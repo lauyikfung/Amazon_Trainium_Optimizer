@@ -878,8 +878,6 @@ if init_from == "resume":
         )
         scaler.load_state_dict(scaler_state)
         del scaler_state
-    elif scaler.is_enabled():
-        raise FileNotFoundError(f"FP16 training requires {scaler_state_path} to resume.")
 
     rng_state_path = os.path.join(resume_checkpoint_dir, _rng_state_filename())
     if not os.path.exists(rng_state_path):
@@ -1181,6 +1179,7 @@ running_mfu = -1.0
 clip_time = 0
 clip_time_dev = torch.zeros((), device=device)
 total_norm_dev = torch.zeros((), device=device) 
+running_loss_dev = torch.zeros((), device=device, dtype=torch.float32)
 while True:
     # Determine and set the learning rate for this iteration
     lr = get_lr(iter_num, schedule=schedule) if decay_lr else learning_rate_base
@@ -1245,8 +1244,6 @@ while True:
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 raw_model.save_pretrained(checkpoint_dir)
                 torch.save(optimizer_state_dict, os.path.join(checkpoint_dir, "optimizer.pt"))
-                if scaler.is_enabled():
-                    torch.save(scaler.state_dict(), os.path.join(checkpoint_dir, "scaler.pt"))
                 trainer_state = {
                     "global_step": iter_num,
                     "best_val_loss": best_val_loss,
@@ -1279,7 +1276,7 @@ while True:
     # block at iter_num == max_iters (when aligned with eval_interval) before exiting.
     if iter_num >= max_iters:
         break
-
+    running_loss_dev = torch.zeros((), device=device, dtype=torch.float32)
     # Forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
@@ -1294,6 +1291,7 @@ while True:
             # Average gradients across micro-steps so accumulation simulates a larger batch.
             loss = loss / gradient_accumulation_steps
         # Immediately async prefetch next batch while model is doing the forward pass on the GPU
+        running_loss_dev = running_loss_dev + loss.detach()
         if use_token_stream_dataloader:
             X, Y = _get_train_batch_stream()
         elif data_rng_mode == "stateless":
@@ -1314,7 +1312,7 @@ while True:
         clip_time_dev = clip_time_dev + (total_norm_dev > grad_clip).to(clip_time_dev.dtype)
     # Step the optimizer and scaler if training in fp16
     if use_xla:
-        xm.optimizer_step(optimizer, barrier=True)   # 内部 all_reduce(grads) + optimizer.step() + mark_step
+        xm.optimizer_step(optimizer, barrier=True) 
     elif scaler is not None:
         scaler.step(optimizer)
         scaler.update()
@@ -1358,7 +1356,7 @@ while True:
 
         if master_process:
             # Convert back to the unscaled (per-microbatch) loss for logging.
-            lossf = loss.item() * gradient_accumulation_steps  # note: this is a CPU-GPU sync point
+            lossf = float(running_loss_dev.item())  # note: this is a CPU-GPU sync point
             if local_iter_num >= 5:  # let the training loop settle a bit
                 mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
@@ -1408,6 +1406,7 @@ while True:
             momentum_norm_sq = float(momentum_sq_sq.sqrt().item())
             momentum_div   = momentum_norm / (np.sqrt(momentum_norm_sq) + 1e-8)
             clip_time = int(clip_time_dev.item())
+            clip_time_dev = torch.zeros_like(clip_time_dev)   # reset after read
             if wandb_log:
                 wandb.log(
                     {
