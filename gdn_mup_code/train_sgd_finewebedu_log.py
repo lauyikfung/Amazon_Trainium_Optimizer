@@ -1572,6 +1572,8 @@ while True:
     # Step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
+    if iter_num % log_interval == 0 and wandb_log and master_process and _is_gdn_model:
+        _log_gdn_group_stats(raw_model, optimizer, iter_num, lr)
     # Flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
 
@@ -1662,11 +1664,6 @@ while True:
                     },
                     step=iter_num,
                 )
-                # GDN muP analysis: per-group weight norms, gradient norms, and update magnitudes.
-                # These replace the removed per-param-per-step grad norm loop and provide
-                # interpretable grouped metrics for validating muP theory across widths.
-                if _is_gdn_model:
-                    _log_gdn_group_stats(raw_model, optimizer, iter_num, lr)
     iter_num += 1
     local_iter_num += 1
 

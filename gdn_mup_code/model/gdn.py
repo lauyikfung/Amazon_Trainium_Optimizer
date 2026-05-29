@@ -543,6 +543,8 @@ class GatedDeltaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int | None = None,
         norm_eps: float = 1e-5,
+        mup: bool = False,
+        hidden_size_base: int | None = None,
         chunk_size: int = 64,
         **kwargs: Any,
     ) -> None:
@@ -553,6 +555,11 @@ class GatedDeltaNet(nn.Module):
         self.allow_neg_eigval = allow_neg_eigval
         self.hidden_size = hidden_size
         self.expand_v = expand_v
+        self.output_multiplier = (
+            float(hidden_size_base if hidden_size_base is not None else hidden_size) / float(hidden_size)
+            if mup
+            else 1.0
+        )
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
@@ -721,6 +728,8 @@ class GatedDeltaNet(nn.Module):
             o = self.o_norm(o)
         o = o.reshape(B, T, self.num_v_heads * self.head_v_dim)
         o = self.o_proj(o)
+        if self.output_multiplier != 1.0:
+            o = o * self.output_multiplier
         return o, None, past_key_values
 
 
@@ -763,6 +772,8 @@ class Block(GradientCheckpointingLayer):
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
                 layer_idx=layer_idx,
+                mup=config.mup,
+                hidden_size_base=config.hidden_size_base,
                 chunk_size=getattr(config, "gdn_chunk_size", 64),
             )
 
@@ -992,9 +1003,10 @@ class GPT(PreTrainedModel):
         mup = getattr(self.config, "mup", False)
         if mup:
             hidden_std = float(getattr(self.config, "hidden_init_std_factor", 0.5)) / math.sqrt(float(self.config.hidden_size))
+            emb_std = float(getattr(self.config, "embedding_init_std", 0.02))
         else:
-            hidden_std = self.config.initializer_range
-        emb_std = float(getattr(self.config, "embedding_init_std", 0.02))
+            hidden_std = float(self.config.initializer_range)
+            emb_std = hidden_std
 
         if isinstance(module, GatedDeltaNet) and next(module.parameters()).device.type != "meta":
             with torch.no_grad():

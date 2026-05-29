@@ -14,7 +14,7 @@ class OptimizerParamGroup(TypedDict):
 def _get_rmsnorm_params(model: nn.Module) -> set[nn.Parameter]:
     rmsnorm_params: set[nn.Parameter] = set()
     for module in model.modules():
-        if module.__class__.__name__ in {"RMSNorm", "RMSNormLinear"}:
+        if module.__class__.__name__ in {"RMSNorm", "RMSNormLinear", "TorchRMSNormGated"}:
             weight = getattr(module, "weight", None)
             bias = getattr(module, "bias", None)
             if isinstance(weight, nn.Parameter):
@@ -30,6 +30,10 @@ def _get_no_wd_params(model: nn.Module) -> set[nn.Parameter]:
             for param in module.parameters():
                 if isinstance(param, nn.Parameter):
                     no_wd_params.add(param)
+    # GDN stores this flag on A_log/dt_bias parameters, not on the module.
+    for _, param in model.named_parameters():
+        if isinstance(param, nn.Parameter) and getattr(param, "_no_weight_decay", False):
+            no_wd_params.add(param)
     return no_wd_params
 
 

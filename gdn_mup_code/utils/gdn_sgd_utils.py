@@ -60,7 +60,7 @@ def get_gdn_sgd_param_groups(
     scalar_params: set[nn.Parameter] = set() # A_log, dt_bias
 
     for module in model.modules():
-        if isinstance(module, GatedDeltaNet):
+        if isinstance(module, GatedDeltaNet) or (hasattr(module, "a_proj") and hasattr(module, "dt_bias")):
             for p in module.a_proj.parameters():
                 gate_params.add(p)
             for p in module.b_proj.parameters():
@@ -73,10 +73,13 @@ def get_gdn_sgd_param_groups(
     # Identify no-weight-decay params (RMSNorm weights, biases)
     no_wd_params: set[nn.Parameter] = set()
     for module in model.modules():
-        if module.__class__.__name__ in {"RMSNorm", "RMSNormLinear", "FusedRMSNormGated"}:
+        if module.__class__.__name__ in {"RMSNorm", "RMSNormLinear", "FusedRMSNormGated", "TorchRMSNormGated"}:
             for p in module.parameters():
                 if isinstance(p, nn.Parameter):
                     no_wd_params.add(p)
+    for _, param in model.named_parameters():
+        if isinstance(param, nn.Parameter) and getattr(param, "_no_weight_decay", False):
+            no_wd_params.add(param)
 
     hidden_decay: list[nn.Parameter] = []
     hidden_no_decay: list[nn.Parameter] = []
